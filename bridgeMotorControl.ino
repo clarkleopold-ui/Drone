@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Servo.h>
-#include "Wire.h" // This library allows you to communicate with I2C devices.
+#include "Wire.h" // This library allows you to communicate with the gyroscope, accelorometer, and altimeter devices.
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP280.h>
 //ps4 controller used to control outputs
 String rxLine;
 //Declared servo variable names
@@ -9,12 +11,7 @@ Servo servo2;
 Servo servo3;
 Servo servo4;
 //---------- Pin setup ----------
-//For an RC plane-style brushless motor, the Arduino normally drives the ESC
-//with a servo-style signal, not by powering the motor directly.
-const int SPEED_CONTROL = 11;
-const int IN1 = 12;
-const int IN2 = 13;
-const int MOTOR1 = 10, MOTOR2 = 11, MOTOR3 = 12, MOTOR4 = 13;
+const int MOTOR1_SPEED = 10, MOTOR2_SPEED = 11, MOTOR3_SPEED = 12, MOTOR4_SPEED = 13;
 const int SERVO1_PIN = 3;
 const int SERVO2_PIN = 4;
 const int SERVO3_PIN = 5;
@@ -27,6 +24,8 @@ const int RED = 9;
 //Calibrate your ESC separately if needed.
 const int ESC_MIN_US = 0;
 const int ESC_MAX_US = 255;
+const int HOVER_THROTTLE = 127;
+const int CRUISE_SPEED = 153;
 //Servo angle limits. Narrow these if your linkage binds mechanically.
 const int SERVO_MIN_DEG = 60;
 const int SERVO_MAX_DEG = 120;
@@ -36,6 +35,7 @@ const unsigned long FAILSAFE_MS = 500;
 unsigned long lastPacketMs = 0;
 //Global variable for checking the internal clock in the arduino
 static long int currTime;
+//---------- Functions ----------
 //Function to communicate to the python files
 int readIntField(const String &src, const char *key, int fallback) {
   String token = String("\"") + key + "\":";
@@ -53,11 +53,6 @@ int readIntField(const String &src, const char *key, int fallback) {
   if (end <= start) return fallback;
   return src.substring(start, end).toInt();
 }
-//returns mapped values from the controller joystick to the python files then to values within the servo range so the servo can read and rotate to those angles
-int axisToServoAngle(int axisValue) {
-  // axisValue is -100 to +100 from Python.
-  return map(axisValue, -100, 100, SERVO_MIN_DEG, SERVO_MAX_DEG);
-}
 // (c) Michael Schoeffler 2017, http://www.mschoeffler.de for gyroscope and accelerometer starter code
 //Drone class
 class DroneState {
@@ -67,16 +62,15 @@ class DroneState {
     int cross, circle, square, triangle;
     int l1, r1;
     // ---------- Motor / L298 ----------
-    int motor1Pwm, motor2Pwm, motor3Pwm, motor4Pwm;
-    char motor1Dir, motor2Dir ,motor3Dir ,motor4Dir;
+    int motor1Pwm, motor2Pwm, motor3Pwm, motor4Pwm; //variables to store pwm values for each motor
+    char motor1Dir, motor2Dir ,motor3Dir ,motor4Dir; //variables to store if the throttle of each motor is increasing, decreasing, or constant for debugging purposes
+    int throttlePercent1, throttlePercent2, throttlePercent3, throttlePercent4; //variables to map the rpm of the motor to a percentage.
     //----------- servo --------
     int servo1Angle, servo2Angle, servo3Angle, servo4Angle;
     bool triangle_lock, square_lock, circle_lock;
-    int servoPosition, servoPosition_delay;
+    int servoPosition;
     long int prevServoTime;
-    bool ServoTimerActive;
-    long int MoveServo_StartTime, prev_move_servo_time;
-    bool servo_free_move;
+    bool free_move;
     //----------- drone states --------
     int drone_state, prevState; //Variables to store the different states of the drone
     //---------- gyroscope and accelerometer ----------
@@ -92,10 +86,12 @@ class DroneState {
       sprintf(tmp_str, "%6d", i);
       return tmp_str;
     } // this function is part of the gyro and accelerometer starter code
+    int axisToServoAngle(int axisValue);
     void parseControllerLine(const String &line);
-    void servo_motor_commands();
-    void state_circle();
-    void state_triangle();
+    void state_circle_motor();
+    void state_circle_servo();
+    void state_triangle_motor();
+    void state_triangle_servo();
     void displayValues_and_buttonPress() const;
     void DroneStates_input();
     //---------- gyroscope and accelerometer function----------
@@ -114,27 +110,27 @@ DroneState::DroneState() {  //Constructor
   triangle = 0;
   l1 = 0;
   r1 = 0;
-  motor1Pwm = 0;
-  motor2Pwm = 0;
-  motor3Pwm = 0;
-  motor4Pwm = 0;
-  motor1Dir = '0';
-  motor2Dir = '0';
-  motor3Dir = '0';
-  motor4Dir = '0';
+  motor1Pwm = HOVER_THROTTLE;
+  motor2Pwm = HOVER_THROTTLE;
+  motor3Pwm = HOVER_THROTTLE;
+  motor4Pwm = HOVER_THROTTLE;
   triangle_lock = false;
   square_lock = false;
   circle_lock = true;
   servoPosition = 0;
-  servoPosition_delay = 0;
   prevServoTime = 0;
-  ServoTimerActive = false;
-  MoveServo_StartTime = 0; 
-  prev_move_servo_time = 0;
   drone_state = 0;
   prevState = 0;
-  servo_free_move = true;
+  free_move = true;
   MPU_ADDR = 0x68;
+}
+//returns mapped values from the controller joystick to the python files then to values within the servo range so the servo can read and rotate to those angles
+int DroneState::axisToServoAngle(int axisValue) {
+  // axisValue is -100 to +100 from Python.
+  if (drone_state == 3)
+    return map(axisValue, -100, 100, 70, 110);
+  else
+    return map(axisValue, -100, 100, SERVO_MIN_DEG, SERVO_MAX_DEG);
 }
 //This function is responsible for storing all the python read values from the controller to then store them into variables in here
 //to allow for the arduino to read and understand inputs from the ps4 controller.
@@ -151,126 +147,112 @@ void DroneState::parseControllerLine(const String &line) {
   r1 = readIntField(line, "r1", r1);
   lastPacketMs = millis();
 }
-//Function to update variables corressponding to the motors and servo from the controller
-void DroneState::servo_motor_commands() {
-  // ---------- Servos ----------
-  
-  /*servo1Angle = axisToServoAngle(ry);
-  servo2Angle = axisToServoAngle(ry);
-  servo3Angle = axisToServoAngle(ry);
-  servo4Angle = axisToServoAngle(ry);*/
-  // ---------- motors ----------
-  if (r1 && !cross) {
-    //variable to map the rpm of the motor to a percentage.
-    static int throttlePercent1;
-    static int throttlePercent2;
-    static int throttlePercent3;
-    static int throttlePercent4;
-    //maps the left joystick's y axis into a percent value based on the PWM values from the ESC
-    if(ly > 0) {
-      throttlePercent1 = constrain(ly, 0, 100);
-      throttlePercent2 = constrain(ly, 0, 100);
-      throttlePercent3 = constrain(ly, 0, 100);
-      throttlePercent4 = constrain(ly, 0, 100);
-      motor1Pwm = map(throttlePercent1, 0, 100, ESC_MIN_US, ESC_MAX_US);
-      motor2Pwm = map(throttlePercent2, 0, 100, ESC_MIN_US, ESC_MAX_US);
-      motor3Pwm = map(throttlePercent3, 0, 100, ESC_MIN_US, ESC_MAX_US);
-      motor4Pwm = map(throttlePercent4, 0, 100, ESC_MIN_US, ESC_MAX_US);
-    } else if (ly < 0) {
-      throttlePercent1 = constrain(ly, -100, 0);
-      throttlePercent2 = constrain(ly, -100, 0);
-      throttlePercent3 = constrain(ly, -100, 0);
-      throttlePercent4 = constrain(ly, -100, 0);
-      motor1Pwm = map(throttlePercent1, -100, 0, ESC_MAX_US, ESC_MIN_US);
-      motor2Pwm = map(throttlePercent2, -100, 0, ESC_MAX_US, ESC_MIN_US);
-      motor3Pwm = map(throttlePercent3, -100, 0, ESC_MAX_US, ESC_MIN_US);
-      motor4Pwm = map(throttlePercent4, -100, 0, ESC_MAX_US, ESC_MIN_US);
-    }
-  }
+//This function corresponds to the default drone state and updates variables corressponding to the motors from the controller 
+void DroneState::state_circle_motor() {
   //When the r1 button on the controller is held down the left joystick can be used to drive power into each motor.
-  //When r1 isn't held down the motors cannot be activated even if the left joystick is being used.
+  //This allows the drone to fly higher into the sky.
+  //When r1 isn't held down the motors will not respond in any circumstance.
   //If the cross button is also pressed then the motors cannot rotate in any circumstance.
-  if (motor1Pwm == 0 || cross || !r1) {
-    analogWrite(SPEED_CONTROL, 0);
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, LOW);
-    motor1Pwm = 0;
-    motor1Dir = '0';
-  } else if (ly > 0) {
+  //When the right joystick is moving in the x-axis the motors will not respond in any circumstance.
+  if (cross || !r1) { 
+    motor1Dir = motor2Dir =  motor3Dir =  motor4Dir = 'C';
+    //all motors set to hover
+    motor1Pwm = motor2Pwm = motor3Pwm = motor4Pwm = HOVER_THROTTLE;
+    throttlePercent1 = throttlePercent2 = throttlePercent3 = throttlePercent4 = (HOVER_THROTTLE/ESC_MAX_US)*100;;
+  }
+  if ((100 > ly > -100) && r1 && free_move) {
+    //maps the left joystick's y axis into a percent value based on the PWM values from the ESC
+    throttlePercent1 = constrain(ly, -100, 100);
+    throttlePercent2 = constrain(ly, -100, 100);
+    throttlePercent3 = constrain(ly, -100, 100);
+    throttlePercent4 = constrain(ly, -100, 100);
+    motor1Pwm = map(throttlePercent1, -100, 100, ESC_MIN_US, ESC_MAX_US);
+    motor2Pwm = map(throttlePercent2, -100, 100, ESC_MIN_US, ESC_MAX_US);
+    motor3Pwm = map(throttlePercent3, -100, 100, ESC_MIN_US, ESC_MAX_US);
+    motor4Pwm = map(throttlePercent4, -100, 100, ESC_MIN_US, ESC_MAX_US);
+    //Check each motors spin direction
+    if(ly > 0)
+      motor1Dir = motor2Dir = motor3Dir = motor4Dir = '+';
+    else if (ly < 0)
+      motor1Dir = motor2Dir = motor3Dir = motor4Dir = '-';
+    else 
+      motor1Dir = motor2Dir = motor3Dir = motor4Dir = 'C';
+  }
+  //When moving the right joystick in the x-axis it will tilt the drone left and right only
+  //if the left loystick is not moving in the y-axis
+  if (rx > 0 && free_move) {
+    throttlePercent1 = constrain(rx, 0, 100);
+    throttlePercent2 = constrain(rx, 0, 100);
+    throttlePercent3 = constrain(rx, 0, 100);
+    throttlePercent4 = constrain(rx, 0, 100);
+    //decrease throttle
+    motor2Pwm = map(throttlePercent2, 0, 100, HOVER_THROTTLE, HOVER_THROTTLE - (HOVER_THROTTLE*0.15));
+    motor4Pwm = map(throttlePercent4, 0, 100, HOVER_THROTTLE, HOVER_THROTTLE - (HOVER_THROTTLE*0.15));
+    //increase throttle
+    motor1Pwm = map(throttlePercent1, 0, 100, HOVER_THROTTLE, HOVER_THROTTLE + (HOVER_THROTTLE*0.15));
+    motor3Pwm = map(throttlePercent3, 0, 100, HOVER_THROTTLE, HOVER_THROTTLE + (HOVER_THROTTLE*0.15));
     motor1Dir = '+';
-    analogWrite(SPEED_CONTROL, motor1Pwm);
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-  } else if (ly < 0) {
-    motor1Dir = '-';
-    analogWrite(SPEED_CONTROL, motor1Pwm);
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
+    motor2Dir = '-';
+    motor3Dir = '+';
+    motor4Dir = '-';
+  } else if (rx < 0 && free_move) {
+    throttlePercent1 = constrain(rx, -100, 0);
+    throttlePercent2 = constrain(rx, -100, 0);
+    throttlePercent3 = constrain(rx, -100, 0);
+    throttlePercent4 = constrain(rx, -100, 0);
+    //decrease throttle
+    motor1Pwm = map(throttlePercent1, -100, 0, HOVER_THROTTLE - (HOVER_THROTTLE*0.15), HOVER_THROTTLE);
+    motor3Pwm = map(throttlePercent3, -100, 0, HOVER_THROTTLE - (HOVER_THROTTLE*0.15), HOVER_THROTTLE);
+    //increase throttle
+    motor2Pwm = map(throttlePercent2, -100, 0, HOVER_THROTTLE + (HOVER_THROTTLE*0.15), HOVER_THROTTLE);
+    motor4Pwm = map(throttlePercent4, -100, 0, HOVER_THROTTLE + (HOVER_THROTTLE*0.15), HOVER_THROTTLE);
+    motor1Dir = motor3Dir = '-';
+    motor2Dir = motor4Dir = '+';
   }
+  //This if statement controls the yawn of the drone, allowing the drone
+  //to rotate/spin in place.
+  //This spins the drone CW
+  if(lx > 0 && !r1 && free_move) {
+    throttlePercent1 = constrain(lx, 0, 100);
+    throttlePercent2 = constrain(lx, 0, 100);
+    throttlePercent3 = constrain(lx, 0, 100);
+    throttlePercent4 = constrain(lx, 0, 100);
+    //decrease throttle
+    motor2Pwm = map(throttlePercent1, 0, 100, HOVER_THROTTLE, HOVER_THROTTLE - (HOVER_THROTTLE*0.3));
+    motor3Pwm = map(throttlePercent3, 0, 100, HOVER_THROTTLE, HOVER_THROTTLE - (HOVER_THROTTLE*0.3));
+    //increase throttle
+    motor1Pwm = map(throttlePercent2, 0, 100, HOVER_THROTTLE, HOVER_THROTTLE + (HOVER_THROTTLE*0.3));
+    motor4Pwm = map(throttlePercent4, 0, 100, HOVER_THROTTLE, HOVER_THROTTLE + (HOVER_THROTTLE*0.3));
+    motor1Dir = motor4Dir = '+';
+    motor2Dir = motor3Dir = '-';
+    //This spins the drone CCW
+  } else if (lx < 0 && !r1 && free_move) {
+    throttlePercent1 = constrain(lx, -100, 0);
+    throttlePercent2 = constrain(lx, -100, 0);
+    throttlePercent3 = constrain(lx, -100, 0);
+    throttlePercent4 = constrain(lx, -100, 0);
+    //decrease throttle
+    motor1Pwm = map(throttlePercent1, -100, 0, HOVER_THROTTLE - (HOVER_THROTTLE*0.3), HOVER_THROTTLE);
+    motor4Pwm = map(throttlePercent3, -100, 0, HOVER_THROTTLE - (HOVER_THROTTLE*0.3), HOVER_THROTTLE);
+    //increase throttle
+    motor2Pwm = map(throttlePercent2, -100, 0, HOVER_THROTTLE + (HOVER_THROTTLE*0.3), HOVER_THROTTLE);
+    motor3Pwm = map(throttlePercent4, -100, 0, HOVER_THROTTLE + (HOVER_THROTTLE*0.3), HOVER_THROTTLE);
+    motor1Dir = motor4Dir = '-';
+    motor2Dir = motor3Dir = '+';
+  }
+  analogWrite(MOTOR1_SPEED, motor1Pwm);
+  analogWrite(MOTOR2_SPEED, motor2Pwm);
+  analogWrite(MOTOR3_SPEED, motor3Pwm);
+  analogWrite(MOTOR4_SPEED, motor4Pwm);
 }
-
-//This function corresponds to Drone_state 3 which is where the two front servos get locked 
-//to 180 degrees while the two back servos are still able to freely rotate.
-//(Similar to a vtol aircraft)
-void DroneState::state_triangle() {
-  //Checks if the bool triangle_lock is false (not locked) and if it is false, gives permission to the front two servos to rotate 
-  //to the 180 degree position. This also locks all servos from being controlled by the ps4 controller untill unlocked later 
-  //in the code below.
-  if (!triangle_lock) {
-    servoPosition = axisToServoAngle(ry);
-    servoPosition_delay = axisToServoAngle(ry);
-    ServoTimerActive = false;
-    servo_free_move = false;
-    MoveServo_StartTime = currTime;
-    ServoTimerActive = true;
-  }
-  //This if statement checks if the previous state was from the circle state and checks if the servoPositions are not yet locked at 180
-  if(prevState == 0 || (servoPosition < 180)) {
-    //If those conditions are true the two front servos will slowly rotate to the 180 degree position 
-    if(currTime - prevServoTime >= 40) {
-      prevServoTime = millis();
-      servoPosition++;
-      servo1Angle = servoPosition;
-      servo4Angle = servoPosition;
-      servo1.write(servoPosition);
-      servo4.write(servoPosition);
-    }
-  }
-  //As long as ServoTimerActive == true it will wait for a specific delay depending on where the servos are positioned right before this
-  //line of code and check if servo_free_move == false before the two back servos can recieve inputs from the controller for saftey hazards 
-  if(ServoTimerActive) {
-    if(((currTime - MoveServo_StartTime) >= (((180 - servoPosition_delay) * 40) + 500)) && (!servo_free_move)) {
-      servo_free_move = true; //unlocks the two back servos
-      ServoTimerActive = false; //stops tracking the timer
-    }
-  }
-  //If the two back servos are unlocked they will be able to recieve input from the controller
-  if (servo_free_move) {
-    //Sends the mapped values from the right joystick and servo values into each individual 
-    //servo variable.
-    servo2Angle = axisToServoAngle(ry);
-    servo3Angle = axisToServoAngle(ry);
-    servo2.write(servo2Angle);
-    servo3.write(servo3Angle);
-  }
-  /*locks the triangle button to not allow the code to repeat the beginning stage for the triangle state which is the motion
-  of moving the front two servo motors into fixed 180 degree positions.*/
-  //unlocks the circle button to allow the beginning of the state to be conducted
-  triangle_lock = true;
-  circle_lock = false;
-}
-
 //This function corresponds with the default drone state allowing the drone to fly like a normal drone
 //giving full access to all servos
-void DroneState::state_circle() {
+void DroneState::state_circle_servo() {
   //Checks if the bool circle_lock is false (not locked) and if it is false, allow the servos to move back into the 90 degree position from of the circle state
   //for the drone. This also locks all servos from being controlled by the ps4 controller untill unlocked later in the code below
   if(!circle_lock) {
     servoPosition = 180;
-    ServoTimerActive = false;
-    servo_free_move = false;
-    MoveServo_StartTime = currTime;
-    ServoTimerActive = true;
+    free_move = false;
   }
   //This if statement checks if the previous state was from the triangle state and checks if the servoPositions are not yet locked at 90
   if(prevState == 3 || (servoPosition >= 90)) {
@@ -279,28 +261,21 @@ void DroneState::state_circle() {
       prevServoTime = millis();
       servoPosition--;
       servo1Angle = servoPosition;
-      servo4Angle = servoPosition;
+      servo2Angle = servoPosition;
       servo1.write(servoPosition);
-      servo4.write(servoPosition);
+      servo2.write(servoPosition);
     }
-  }
-  //As long as ServoTimerActive == true it will wait for a 3600 delay and check if servo_free_move == false which is when the two front
-  //servos are done rotating back to 90 degrees before all sevos can recieve inputs from the controller for saftey hazards.
-  //ServoTimerActive is used to track the time from the mills() function stored in the currTime variable to allow for the delay to occur
-  if(ServoTimerActive) {
-    if(((currTime - MoveServo_StartTime) >= 4500) && (!servo_free_move)) {
-      servo_free_move = true; //unlocks all servos
-      ServoTimerActive = false; //stops tracking the timer
-    }
+  } else {
+    free_move = true; //unlocks all servos
+    triangle_lock = false;  //unlocks the triangle button to allowing for that button to be pressed again
   }
   //If the all servos are unlocked they will be able to recieve input from the controller
-  if (servo_free_move ) {
-    //Sends the mapped values from the left joystick and servo values into each individual 
-    //servo variable.
-    servo1Angle = axisToServoAngle(ry);
-    servo2Angle = axisToServoAngle(ry);
-    servo3Angle = axisToServoAngle(ry);
-    servo4Angle = axisToServoAngle(ry);
+  if (free_move ) {
+    //Sends the mapped values from the left joystick and servo values into each individual servo variable.
+    servo1Angle = state.axisToServoAngle(ry);
+    servo2Angle = state.axisToServoAngle(ry);
+    servo3Angle = state.axisToServoAngle(ry);
+    servo4Angle = state.axisToServoAngle(ry);
     servo1.write(servo1Angle);
     servo2.write(servo2Angle);
     servo3.write(servo3Angle);
@@ -308,10 +283,85 @@ void DroneState::state_circle() {
   }
   /*locks the triangle button to not allow the code to repeat the beginning stage for the triangle state which is the motion
   of moving the front two servo motors into fixed 180 degree positions.*/
-  //unlocks the triangle button to allow the beginning of the state to be conducted
-  triangle_lock = false;
   circle_lock = true;
 }
+//This function corresponds with the a drone state 3 where the 2 front motors get set to a
+//crusing speed or can increase to a higher speed controlled by the left joystick in the y-axis,
+//and the back 2 motors will get adjusted based on inputs from the right joystick in the y-axis
+void DroneState::state_triangle_motor() {
+  //when cross is pressed or r1 isn't pressed have the front 2 motors rotate at crusing speed
+  //and have the back 2 motors rotate at hovering speeds
+  if((cross || !r1) && free_move) {
+    throttlePercent1 = throttlePercent2 = (CRUISE_SPEED/ESC_MAX_US)*100;
+    throttlePercent3 = throttlePercent4 = (HOVER_THROTTLE/ESC_MAX_US)*100;
+    motor1Pwm = motor2Pwm = CRUISE_SPEED;
+    motor3Pwm = motor4Pwm = HOVER_THROTTLE;
+    motor1Dir = motor2Dir = motor3Dir = motor4Dir = 'C';
+  //When the 2 front motors are free to move and the left joystick in the y-axis greater than 0
+  //increase the motor rpm starting from the cruise speed rpm to the max rpm
+  } else if ((ly >= 0) && free_move) {
+    throttlePercent1 = throttlePercent2 = constrain(ly, 0, 100);
+    motor1Pwm = map(throttlePercent1, 0, 100, CRUISE_SPEED, ESC_MAX_US);
+    motor2Pwm = map(throttlePercent2, 0, 100, CRUISE_SPEED, ESC_MAX_US);
+    motor1Dir = motor2Dir = '+';
+  //Changes the rmp of the back 2 motors by a +- 10%
+  } else if ((100 > ry > -100) && free_move) {
+    throttlePercent3 = throttlePercent4 = constrain(ry, -100, 100);
+    motor3Pwm = map(throttlePercent3, -100, 100, HOVER_THROTTLE - (HOVER_THROTTLE*0.1), HOVER_THROTTLE + (HOVER_THROTTLE*0.1));
+    motor4Pwm = map(throttlePercent4, -100, 100, HOVER_THROTTLE - (HOVER_THROTTLE*0.1), HOVER_THROTTLE + (HOVER_THROTTLE*0.1));
+    //Changes the motor4Dir if the 2 back motors are increasing in rpm, decreasing in rpm, or constant
+    if (ry > 0)
+      motor3Dir = motor4Dir = '+';
+    else if (ry < 0)
+      motor3Dir = motor4Dir = '-';
+    else 
+      motor3Dir = motor4Dir = 'C';
+  }
+  analogWrite(MOTOR1_SPEED, motor1Pwm);
+  analogWrite(MOTOR2_SPEED, motor2Pwm);
+  analogWrite(MOTOR3_SPEED, motor3Pwm);
+  analogWrite(MOTOR4_SPEED, motor4Pwm);
+}
+//This function corresponds to Drone state 3 which is where the two front servos get locked 
+//to 180 degrees while the two back servos are still able to freely rotate.
+//(Similar to a vtol aircraft)
+void DroneState::state_triangle_servo() {
+  //Checks if the bool triangle_lock is false (not locked) and if it is false, gives permission to the front two servos to rotate 
+  //to the 180 degree position. This also locks all servos from being controlled by the ps4 controller untill unlocked later 
+  //in the code below.
+  if (!triangle_lock) {
+    servoPosition = state.axisToServoAngle(ry);
+    free_move = false;
+  }
+  //This if statement checks if the previous state was from the circle state and checks if the servoPositions are not yet locked at 180
+  if(prevState == 0 || (servoPosition < 180)) {
+    //If those conditions are true the two front servos will slowly rotate to the 180 degree position 
+    if(currTime - prevServoTime >= 40) {
+      prevServoTime = millis();
+      servoPosition++;
+      servo1Angle = servoPosition;
+      servo2Angle = servoPosition;
+      servo1.write(servoPosition);
+      servo2.write(servoPosition);
+    }
+  } else {
+    free_move = true; //unlocks the two back servos
+    circle_lock = false; //unlocks the circle button to allowing for that button to be pressed again
+  }
+  //If the two back servos are unlocked they will be able to recieve input from the controller
+  if (free_move) {
+    //Sends the mapped values from the right joystick and servo values into each individual 
+    //servo variable.
+    servo3Angle = state.axisToServoAngle(ry);
+    servo4Angle = state.axisToServoAngle(ry);
+    servo3.write(servo3Angle);
+    servo4.write(servo4Angle);
+  }
+  /*locks the triangle button to not allow the code to repeat the beginning stage for the triangle state which is the motion
+  of moving the front two servo motors into fixed 180 degree positions.*/
+  triangle_lock = true;
+}
+
 /*displays all the values from the controller onto the drone app while 
 also turing the RGB LED on to specific colors when specific buttons are pressed.*/
 void DroneState::displayValues_and_buttonPress() const{
@@ -320,8 +370,11 @@ void DroneState::displayValues_and_buttonPress() const{
   // ---------- Debug output ----------
   Serial.print("ACK motor_pwm=");
   Serial.print(motor1Pwm);
+  Serial.print(" ");
   Serial.print(motor2Pwm);
+  Serial.print(" ");
   Serial.print(motor3Pwm);
+  Serial.print(" ");
   Serial.print(motor4Pwm);
   Serial.print(" servo1=");
   Serial.print(servo1Angle);
@@ -361,17 +414,15 @@ void DroneState::displayValues_and_buttonPress() const{
     analogWrite(RED, 4);
     analogWrite(GREEN, 206);
     analogWrite(BLUE, 255);
-  }
-  //Prints " MOTOR_LOCKED" if r1 is not pressed
-  if (!r1) Serial.print(" MOTOR_LOCKED");
-  //if r1 is pressed turn on the RGB LED to a purple color
-  if (r1) 
-  {
+    //if r1 is pressed turn on the RGB LED to a purple color
+  } else if (r1) {
     buttonPress = true;
     analogWrite(RED, 209);
     analogWrite(GREEN, 4);
     analogWrite(BLUE, 247);
   }
+  //Prints " MOTOR_LOCKED" if r1 is not pressed
+  if (!r1) Serial.print(" MOTOR_LOCKED");
   //turns the RGB LED off after a 1 second time delay
   if (!buttonPress && (currTime - last_RGB_time) > 1000)
   {
@@ -413,18 +464,22 @@ void DroneState::DroneStates_input() {
     prevState = drone_state;
     drone_state = 0;
   }
-  if (drone_state == 3)
-    state.state_triangle();
-  else if (drone_state == 0)
-    state.state_circle();
+  if (drone_state == 3) {
+    state.state_triangle_servo();
+    state.state_triangle_motor();
+  } else if (drone_state == 0) {
+    state.state_circle_servo();
+    state.state_circle_motor();
+  }
 }
 //Setting up all input pins, output pins, and hardware
 void setup() {
   Serial.begin(115200);
   rxLine.reserve(180); //reserves 180 bytes of memory for this string
-  pinMode(SPEED_CONTROL, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
+  pinMode(MOTOR1_SPEED, OUTPUT);
+  pinMode(MOTOR2_SPEED, OUTPUT);
+  pinMode(MOTOR3_SPEED, OUTPUT);
+  pinMode(MOTOR4_SPEED, OUTPUT);
   pinMode(BLUE, OUTPUT);
   pinMode(GREEN, OUTPUT);
   pinMode(RED, OUTPUT); 
@@ -463,7 +518,6 @@ void loop() {
         //call all functions that manipulate drone outputs or display debugging information
         state.parseControllerLine(rxLine);
         state.DroneStates_input();
-        state.servo_motor_commands();
         state.displayValues_and_buttonPress();
       }
       rxLine = "";
@@ -478,27 +532,13 @@ void loop() {
   }
   // Failsafe: if computer/controller bridge to arduino disconnects, set the motors to hover and turn on RGB LED to an orange yellow color.
   if (millis() - lastPacketMs > FAILSAFE_MS) {
-    static long int last_Speed_Control;
-    static int speedNum = 1;
-    /*analogWrite(SPEED_CONTROL, 150);
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);*/
-    analogWrite(SPEED_CONTROL, (ESC_MAX_US - speedNum));
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
+    analogWrite(MOTOR1_SPEED, 150);
+    analogWrite(MOTOR2_SPEED, 150);
+    analogWrite(MOTOR3_SPEED, 150);
+    analogWrite(MOTOR4_SPEED, 150);
     analogWrite(RED, 255);
     analogWrite(GREEN, 70);
     analogWrite(BLUE, 0);
-    if(millis() - last_Speed_Control > 75) {
-      last_Speed_Control = millis();
-      speedNum++;
-    }
-    if(speedNum >= 255)
-    {
-      analogWrite(SPEED_CONTROL, 0);
-      digitalWrite(IN1, LOW);
-      digitalWrite(IN2, LOW);
-    }
   }
   //gyroscope and accelorometer functions called
   state.start_MPU_data();
