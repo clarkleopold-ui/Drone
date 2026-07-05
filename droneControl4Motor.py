@@ -66,41 +66,50 @@ def safety_payload():
 # ACK parser
 # -----------------------------
 def parse_ack(line):
-    """Take one Arduino status line and convert it into a Python dictionary.
-
-    Expected 4-motor ACK format:
-        ACK motor1_pwm=0 motor1_dir=0 motor2_pwm=0 motor2_dir=0 motor3_pwm=0 motor3_dir=0 motor4_pwm=0 motor4_dir=0 servo1=90 servo2=90 servo3=90 servo4=90 lx=0 ly=0 rx=0 ry=0 MOTOR_LOCKED
-
-    Backward compatibility:
-        If the Arduino still prints motor_pwm and motor_dir, those values are used for motor 1.
-    """
     values = {}
 
-    # Motor PWM values. New format is motor1_pwm ... motor4_pwm.
-    # Old format motor_pwm still maps to motor1_pwm so older Arduino code does not fully break.
-    old_motor_pwm = re.search(r"motor_pwm=(-?\d+)", line)
-    old_motor_dir = re.search(r"motor_dir=([+\-0]|CW|CCW)", line)
-
+    # Default values
     for motor_num in range(1, 5):
-        pwm_key = f"motor{motor_num}_pwm"
-        dir_key = f"motor{motor_num}_dir"
+        values[f"motor{motor_num}_pwm"] = 1000
+        values[f"motor{motor_num}_dir"] = "N/A"
 
-        pwm_match = re.search(rf"{pwm_key}=(-?\d+)", line)
-        dir_match = re.search(rf"{dir_key}=([+\-0]|CW|CCW)", line)
+    for key in ["servo1", "servo2", "servo3", "servo4", "lx", "ly", "rx", "ry"]:
+        values[key] = 0
 
-        # Backward compatibility for the original single-motor names.
-        if motor_num == 1 and not pwm_match:
-            pwm_match = old_motor_pwm
-        if motor_num == 1 and not dir_match:
-            dir_match = old_motor_dir
+    values["roll_deg"] = 0.0
+    values["pitch_deg"] = 0.0
+    values["yaw_deg"] = 0.0
+    values["altitude_m"] = None
 
-        values[pwm_key] = int(pwm_match.group(1)) if pwm_match else 0
-        values[dir_key] = dir_match.group(1) if dir_match else "0"
+    # Parse motor_pwm=1400 1400 1400 1400
+    motor_match = re.search(
+        r"motor_pwm=(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)",
+        line
+    )
+    if motor_match:
+        values["motor1_pwm"] = int(motor_match.group(1))
+        values["motor2_pwm"] = int(motor_match.group(2))
+        values["motor3_pwm"] = int(motor_match.group(3))
+        values["motor4_pwm"] = int(motor_match.group(4))
 
-    # Servo and joystick values.
+    # Parse servo and joystick values
     for key in ["servo1", "servo2", "servo3", "servo4", "lx", "ly", "rx", "ry"]:
         match = re.search(rf"{key}=(-?\d+)", line)
         values[key] = int(match.group(1)) if match else 0
+
+    # Parse roll / pitch / yaw floats
+    roll_match = re.search(r"Roll\s*\[°\]:\s*(-?\d+(?:\.\d+)?)", line)
+    pitch_match = re.search(r"Pitch\s*\[°\]:\s*(-?\d+(?:\.\d+)?)", line)
+    yaw_match = re.search(r"Yaw\s*\[°\]:\s*(-?\d+(?:\.\d+)?)", line)
+
+    values["roll_deg"] = float(roll_match.group(1)) if roll_match else 0.0
+    values["pitch_deg"] = float(pitch_match.group(1)) if pitch_match else 0.0
+    values["yaw_deg"] = float(yaw_match.group(1)) if yaw_match else 0.0
+
+    # Optional future altitude support
+    altitude_match = re.search(r"Altitude\s*\[m\]:\s*(-?\d+(?:\.\d+)?)", line)
+    if altitude_match:
+        values["altitude_m"] = float(altitude_match.group(1))
 
     values["motor_locked"] = "MOTOR_LOCKED" in line
     values["kill"] = "KILL" in line
@@ -122,6 +131,7 @@ class BridgeWorker(threading.Thread):
 
     def __init__(self, port, baud, hz, ui_queue, command_queue, show_raw=False):
         super().__init__(daemon=True)
+
         self.port = port
         self.baud = baud
         self.hz = hz
@@ -286,6 +296,20 @@ class DroneApp(tk.Tk):
 
         self.connection_var = tk.StringVar(value="Disconnected")
 
+        # Flight telemetry display variables
+        self.roll_var = tk.StringVar(value="0.00°")
+        self.pitch_var = tk.StringVar(value="0.00°")
+        self.yaw_var = tk.StringVar(value="0.00°")
+        self.altitude_var = tk.StringVar(value="N/A")
+
+        # Raw and displayed attitude values
+        self.last_raw_yaw = 0.0
+        self.yaw_zero_offset = 0.0
+
+        self.display_roll = 0.0
+        self.display_pitch = 0.0
+        self.display_yaw = 0.0
+
         self.motor1_speed_var = tk.StringVar(value="0%")
         self.motor2_speed_var = tk.StringVar(value="0%")
         self.motor3_speed_var = tk.StringVar(value="0%")
@@ -316,6 +340,16 @@ class DroneApp(tk.Tk):
         self.refresh_ports()
         self.after(100, self.process_ui_queue)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def wrap_angle(self, angle):
+        """Keep yaw between -180 and +180 degrees."""
+        return (angle + 180.0) % 360.0 - 180.0
+
+    def zero_yaw(self):
+        """Treat the drone's current direction as zero degrees."""
+        self.yaw_zero_offset = self.last_raw_yaw
+        self.yaw_var.set("0.00°")
+        self.log("Yaw reference reset to 0°.")
 
     # -----------------------------
     # Building the UI
@@ -416,6 +450,24 @@ class DroneApp(tk.Tk):
 
         self.make_metric(servo_box, "Servo 4", self.servo4_var, 0, 3)
         self.servo4_bar.grid(row=1, column=3, sticky="ew", padx=10)
+
+        telemetry_box = ttk.LabelFrame(root, text="Flight Telemetry", padding=10)
+        telemetry_box.pack(fill="x", pady=(0, 15))
+
+        for i in range(5):
+            telemetry_box.columnconfigure(i, weight=1)
+
+        self.make_metric(telemetry_box, "Roll", self.roll_var, 0, 0)
+        self.make_metric(telemetry_box, "Pitch", self.pitch_var, 0, 1)
+        self.make_metric(telemetry_box, "Relative Yaw", self.yaw_var, 0, 2)
+        self.make_metric(telemetry_box, "Altitude", self.altitude_var, 0, 3)
+
+        zero_yaw_button = ttk.Button(
+            telemetry_box,
+            text="Zero Yaw",
+            command=self.zero_yaw
+        )
+        zero_yaw_button.grid(row=0, column=4, padx=10, pady=5)
 
         # Joystick axes frame
         axes_box = ttk.LabelFrame(root, text="Joystick Axes", padding=10)
@@ -577,11 +629,14 @@ class DroneApp(tk.Tk):
             return "CW"
         if raw_direction in ["-", "CCW"]:
             return "CCW"
-        return "0 Stopped"
+        if raw_direction == "N/A":
+            return "Direction not reported"
+        return "Stopped"
 
     def update_motor_display(self, motor_num, pwm, direction):
         """Update one motor's percent bar and direction text."""
-        motor_percent = max(0, min(100, int(pwm / 255 * 100)))
+        motor_percent = int((pwm - 1000) / (2000 - 1000) * 100)
+        motor_percent = max(0, min(100, motor_percent))
 
         if motor_num == 1:
             self.motor1_speed_var.set(f"{motor_percent}%")
@@ -605,6 +660,22 @@ class DroneApp(tk.Tk):
     # -----------------------------
     def update_dashboard(self, ack_line):
         data = parse_ack(ack_line)
+
+        # Update roll, pitch, yaw, and altitude
+        self.last_raw_yaw = data["yaw_deg"]
+
+        relative_yaw = self.wrap_angle(
+            self.last_raw_yaw - self.yaw_zero_offset
+        )
+
+        self.roll_var.set(f"{data['roll_deg']:.2f}°")
+        self.pitch_var.set(f"{data['pitch_deg']:.2f}°")
+        self.yaw_var.set(f"{relative_yaw:.2f}°")
+
+        if data["altitude_m"] is None:
+            self.altitude_var.set("N/A")
+        else:
+            self.altitude_var.set(f"{data['altitude_m']:.2f} m")
 
         for motor_num in range(1, 5):
             self.update_motor_display(
