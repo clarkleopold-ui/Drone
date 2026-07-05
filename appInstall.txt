@@ -20,3 +20,8 @@ dist\DroneControl.exe
 	find any png, jpg, preferable ico b/c then don't need to convert to .ico
 	
 pyinstaller --noconfirm --onefile --windowed --icon=drone_icon.ico --name DroneControl droneAppHardware.py
+
+
+Note: When updating .exe start launch file, run following line in proper directory (as listed above) in termain/cmd
+
+	py -m PyInstaller --onefile --windowed --clean --name "Drone Dashboard" droneControl4Motor.py
