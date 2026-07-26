@@ -1,0 +1,164 @@
+AMBATUDRONE BLUETOOTH SETUP
+===========================
+
+PURPOSE
+-------
+This adds Bluetooth without changing the existing controller, motor, IMU,
+failsafe, dashboard, or dormant servo behavior.
+
+Communication path:
+
+  PS4 controller
+      -> droneControl4Motor.py / AmbatuDrone.exe
+      -> Windows Bluetooth COM port
+      -> ESP32 Bluetooth Classic SPP
+      -> ESP32 UART2
+      -> Arduino Mega Serial1
+
+The exact same JSON commands and ACK telemetry used by the working USB bridge
+are used over Bluetooth.
+
+
+FILES TO UPLOAD
+---------------
+Arduino Mega:
+
+  bridgeMotorControl_Bluetooth.ino
+
+ESP32-WROOM-32D:
+
+  AmbatuDrone_ESP32_Bluetooth_Bridge.ino
+
+The existing droneControl4Motor.py app does not need another code change.
+
+
+WIRING
+------
+Always cross TX to RX and connect the grounds:
+
+  Arduino Mega TX1, pin 18
+      -> 1 kohm resistor
+      -> ESP32 GPIO16 (RX)
+
+  ESP32 GPIO16 (same junction)
+      -> 2 kohm resistor
+      -> GND
+
+  ESP32 GPIO17 (TX)
+      -> Arduino Mega RX1, pin 19
+
+  Arduino Mega GND
+      -> ESP32 GND
+
+The 1 kohm and 2 kohm resistors form a divider that reduces the Mega's 5 V TX
+signal to about 3.3 V before it reaches the ESP32.
+
+Power the ESP32 development board from its own USB connection during testing.
+Do not power it from the Mega's 3.3 V pin.
+
+
+UPLOAD ORDER
+------------
+1. In Arduino IDE, upload bridgeMotorControl_Bluetooth.ino to the Arduino Mega.
+
+2. Install/select the Espressif ESP32 board package if it is not already
+   available.
+
+3. Select the ESP32 board. "ESP32 Dev Module" is normally appropriate for the
+   Inland ESP32-WROOM-32D development board.
+
+4. Upload AmbatuDrone_ESP32_Bluetooth_Bridge.ino to the ESP32.
+
+5. Wire the Mega and ESP32 exactly as listed above.
+
+6. Power both boards. Keep the MPU-6050 still while the Mega starts.
+
+
+PAIR WITH WINDOWS
+-----------------
+1. Open Windows Settings.
+
+2. Go to:
+
+     Bluetooth & devices -> Add device -> Bluetooth
+
+3. Select:
+
+     AmbatuDrone
+
+4. Open Device Manager and expand:
+
+     Ports (COM & LPT)
+
+5. Find the "Standard Serial over Bluetooth link" COM port created for
+   AmbatuDrone. Windows may create two Bluetooth COM ports. Use the outgoing
+   port; if the first one does not connect, select the other one in the app.
+
+
+RUN THE APP
+-----------
+1. Connect the PS4 controller to the computer.
+
+2. Launch droneControl4Motor.py or AmbatuDrone.exe.
+
+3. Refresh the port list.
+
+4. Select the AmbatuDrone Bluetooth COM port.
+
+5. Keep:
+
+     Baud: 115200
+     Hz:   25
+
+6. Click Connect.
+
+The app should receive the normal Mega ACK telemetry. Bluetooth should behave
+the same way as the existing wired USB connection.
+
+
+FIRST TEST
+----------
+Test with all propellers removed.
+
+Expected behavior:
+
+  - The app connects and begins displaying ACK telemetry.
+  - R1 released: all motors remain at 1000 us and MOTOR_LOCKED is shown.
+  - R1 held at low throttle: the system can arm.
+  - X or the app KILL button: all motors return to 1000 us.
+  - Turning off or disconnecting Bluetooth: the Mega enters FAILSAFE within
+    500 ms and commands all motors to 1000 us.
+
+
+QUICK TROUBLESHOOTING
+---------------------
+Bluetooth device does not appear:
+
+  - Confirm the uploaded ESP32 sketch prints
+    "AmbatuDrone Bluetooth bridge ready" in the ESP32 Serial Monitor.
+  - Confirm the selected board is an original ESP32 / ESP32-WROOM-32D.
+    Bluetooth Classic SPP is not available on ESP32-C3 or ESP32-S3.
+  - Remove an old AmbatuDrone pairing from Windows, restart the ESP32, and pair
+    it again.
+
+COM port opens but the app receives no ACK:
+
+  - Try the other Bluetooth COM port created by Windows.
+  - Confirm Mega pin 18 goes to ESP32 GPIO16 through the voltage divider.
+  - Confirm ESP32 GPIO17 goes to Mega pin 19.
+  - Confirm both boards share GND.
+  - Confirm both sketches use 115200 baud.
+  - Confirm bridgeMotorControl_Bluetooth.ino, not the USB-only sketch, is on
+    the Mega.
+
+App receives ACK but controller commands do not work:
+
+  - TX/RX may be connected in only one direction. Recheck both UART wires.
+  - Close other programs that may have opened the Bluetooth COM port.
+
+Connection drops:
+
+  - Keep the ESP32 powered from a stable USB or regulated 5 V/VIN supply.
+  - Keep ESP32/UART wiring away from motor and ESC power wiring.
+  - Reconnect in the app. The Mega's failsafe should keep motor output at
+    1000 us while the connection is absent.

@@ -16,6 +16,23 @@ from serial.tools import list_ports
 
 DEFAULT_BAUD = 115200
 DEFAULT_HZ = 25.0
+BRIDGE_STARTUP_TIMEOUT_S = 12.0
+TELEMETRY_TIMEOUT_S = 1.0
+SERIAL_BUFFER_LIMIT = 4096
+
+# SDL's standard DualShock/Xbox-style controller layout.
+# Raw controller debug remains available in the UI for driver-specific checks.
+AXIS_LX = 0
+AXIS_LY = 1
+AXIS_RX = 2
+AXIS_RY = 3
+
+BUTTON_CROSS = 0
+BUTTON_CIRCLE = 1
+BUTTON_SQUARE = 2
+BUTTON_TRIANGLE = 3
+BUTTON_L1 = 9
+BUTTON_R1 = 10
 
 
 # -----------------------------
@@ -66,6 +83,9 @@ def safety_payload():
 # ACK parser
 # -----------------------------
 def parse_ack(line):
+    if not line.startswith("ACK "):
+        raise ValueError("Not an Arduino ACK line")
+
     values = {}
 
     # Default values
@@ -98,13 +118,27 @@ def parse_ack(line):
         values[key] = int(match.group(1)) if match else 0
 
     # Parse roll / pitch / yaw floats
-    roll_match = re.search(r"Roll\s*\[°\]:\s*(-?\d+(?:\.\d+)?)", line)
-    pitch_match = re.search(r"Pitch\s*\[°\]:\s*(-?\d+(?:\.\d+)?)", line)
-    yaw_match = re.search(r"Yaw\s*\[°\]:\s*(-?\d+(?:\.\d+)?)", line)
+    roll_match = re.search(
+        r"Roll(?:\s*\[[^\]]*\])?\s*:\s*(-?\d+(?:\.\d+)?)",
+        line,
+    )
+    pitch_match = re.search(
+        r"Pitch(?:\s*\[[^\]]*\])?\s*:\s*(-?\d+(?:\.\d+)?)",
+        line,
+    )
+    yaw_match = re.search(
+        r"Yaw(?:\s*\[[^\]]*\])?\s*:\s*(-?\d+(?:\.\d+)?)",
+        line,
+    )
+    yaw_rate_match = re.search(
+        r"Yaw Rate(?:\s*\[[^\]]*\])?\s*:\s*(-?\d+(?:\.\d+)?)",
+        line,
+    )
 
     values["roll_deg"] = float(roll_match.group(1)) if roll_match else 0.0
     values["pitch_deg"] = float(pitch_match.group(1)) if pitch_match else 0.0
     values["yaw_deg"] = float(yaw_match.group(1)) if yaw_match else 0.0
+    values["yaw_rate_dps"] = float(yaw_rate_match.group(1)) if yaw_rate_match else 0.0
 
     # Optional future altitude support
     altitude_match = re.search(r"Altitude\s*\[m\]:\s*(-?\d+(?:\.\d+)?)", line)
@@ -113,6 +147,9 @@ def parse_ack(line):
 
     values["motor_locked"] = "MOTOR_LOCKED" in line
     values["kill"] = "KILL" in line
+    values["failsafe"] = "FAILSAFE" in line
+    values["imu_error"] = "IMU_ERROR" in line
+    values["throttle_not_low"] = "THROTTLE_NOT_LOW" in line
     values["centered"] = "SERVOS_CENTERED" in line or "CENTERED" in line
 
     return values
@@ -141,6 +178,13 @@ class BridgeWorker(threading.Thread):
         self.stop_event = threading.Event()
         self.ser = None
         self.joystick = None
+        self.serial_rx_buffer = bytearray()
+        self.kill_latched = False
+        self.telemetry_lost = False
+        self.last_ack_time = None
+        self.last_r1 = 0
+        self.last_cross = 0
+        self.last_ly = 0
 
     def send_ui(self, kind, message):
         self.ui_queue.put((kind, message))
@@ -150,14 +194,152 @@ class BridgeWorker(threading.Thread):
             line = json.dumps(payload, separators=(",", ":")) + "\n"
             self.ser.write(line.encode("utf-8"))
 
+    def send_safety_burst(self):
+        """Send redundant stop packets so shutdown is safe on a noisy link."""
+        for _ in range(3):
+            self.send_json(safety_payload())
+            self.stop_event.wait(0.02)
+
     def stop_safely(self, reason):
         self.send_ui("info", reason)
         try:
-            self.send_json(safety_payload())
-            time.sleep(0.05)
+            self.send_safety_burst()
         except Exception as exc:
             self.send_ui("warning", f"Could not send safety packet: {exc}")
         self.stop_event.set()
+
+    def read_serial_lines(self):
+        """Read complete serial lines without blocking on a partial packet."""
+        if not self.ser or not self.ser.is_open:
+            return []
+
+        waiting = self.ser.in_waiting
+        if waiting:
+            self.serial_rx_buffer.extend(self.ser.read(waiting))
+
+        if len(self.serial_rx_buffer) > SERIAL_BUFFER_LIMIT:
+            self.serial_rx_buffer.clear()
+            self.send_ui("warning", "Serial receive buffer overflow; discarded incomplete data.")
+            return []
+
+        lines = []
+        while b"\n" in self.serial_rx_buffer:
+            raw_line, _, remainder = self.serial_rx_buffer.partition(b"\n")
+            self.serial_rx_buffer = bytearray(remainder)
+            line = raw_line.rstrip(b"\r").decode("utf-8", errors="replace").strip()
+            if line:
+                lines.append(line)
+        return lines
+
+    def handle_serial_line(self, line):
+        if line.startswith("ACK "):
+            self.last_ack_time = time.monotonic()
+            if self.telemetry_lost:
+                self.telemetry_lost = False
+                self.send_ui("telemetry_recovered", "Telemetry restored; kill remains latched.")
+            self.send_ui("ack", line)
+            return True
+
+        self.send_ui("info", f"DEVICE: {line}")
+        return False
+
+    def process_commands(self):
+        """Handle UI commands and return False when the bridge should stop."""
+        try:
+            while True:
+                command = self.command_queue.get_nowait()
+
+                if command == "disconnect":
+                    self.stop_safely("Disconnect requested from app.")
+                    return False
+
+                if command == "kill":
+                    if not self.kill_latched:
+                        self.kill_latched = True
+                        self.send_ui("kill_state", True)
+                    self.send_json(safety_payload())
+
+                elif command == "reset_kill":
+                    if self.last_cross:
+                        self.send_ui("warning", "Release X before resetting the kill latch.")
+                    elif self.last_r1:
+                        self.send_ui("warning", "Release R1 before resetting the kill latch.")
+                    elif self.last_ly > 5:
+                        self.send_ui("warning", "Lower the throttle before resetting the kill latch.")
+                    elif self.telemetry_lost:
+                        self.send_ui("warning", "Kill cannot be reset while telemetry is missing.")
+                    else:
+                        self.kill_latched = False
+                        self.send_ui("kill_state", False)
+                        self.send_ui("info", "Kill latch reset. Motors still require R1 to enable.")
+
+        except queue.Empty:
+            pass
+
+        return not self.stop_event.is_set()
+
+    def wait_for_bridge_ack(self):
+        """Wait for a real Mega ACK over either USB serial or Bluetooth SPP."""
+        deadline = time.monotonic() + BRIDGE_STARTUP_TIMEOUT_S
+        self.send_ui(
+            "info",
+            "Waiting for Arduino telemetry (USB reset and MPU calibration can take several seconds)...",
+        )
+
+        while not self.stop_event.is_set() and time.monotonic() < deadline:
+            if not self.process_commands():
+                return False
+
+            for line in self.read_serial_lines():
+                if self.handle_serial_line(line):
+                    return True
+
+            self.stop_event.wait(0.02)
+
+        if self.stop_event.is_set():
+            return False
+
+        raise RuntimeError(
+            "The serial port opened, but no Arduino ACK arrived within 12 seconds. "
+            "Check the selected port, set 115200 baud, and confirm the corrected Mega sketch is running."
+        )
+
+    def controller_payload(self):
+        pygame.event.pump()
+
+        # SDL axes: left X/Y and right X/Y. Upward stick motion is negative
+        # in pygame, so Y axes are inverted before sending them to the Mega.
+        raw_lx = get_axis_safe(self.joystick, AXIS_LX)
+        raw_ly = get_axis_safe(self.joystick, AXIS_LY)
+        raw_rx = get_axis_safe(self.joystick, AXIS_RX)
+        raw_ry = get_axis_safe(self.joystick, AXIS_RY)
+
+        cross = get_button_safe(self.joystick, BUTTON_CROSS)
+        self.last_cross = cross
+        self.last_r1 = get_button_safe(self.joystick, BUTTON_R1)
+        self.last_ly = normalize_axis(-raw_ly)
+
+        # X is a latched kill. Releasing X does not restart the motors.
+        if cross and not self.kill_latched:
+            self.kill_latched = True
+            self.send_ui("kill_state", True)
+            self.send_ui("warning", "Controller X pressed; kill is latched.")
+
+        if self.kill_latched or self.telemetry_lost:
+            return safety_payload()
+
+        return {
+            "lx": normalize_axis(raw_lx),
+            "ly": self.last_ly,
+            "rx": normalize_axis(raw_rx),
+            "ry": normalize_axis(-raw_ry),
+            "cross": cross,
+            "circle": get_button_safe(self.joystick, BUTTON_CIRCLE),
+            "square": get_button_safe(self.joystick, BUTTON_SQUARE),
+            "triangle": get_button_safe(self.joystick, BUTTON_TRIANGLE),
+            "l1": get_button_safe(self.joystick, BUTTON_L1),
+            "r1": self.last_r1,
+        }
 
     def run(self):
         try:
@@ -176,67 +358,53 @@ class BridgeWorker(threading.Thread):
                 f"Axes: {self.joystick.get_numaxes()} | Buttons: {self.joystick.get_numbuttons()} | Hats: {self.joystick.get_numhats()}",
             )
 
-            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
-            time.sleep(2.0)  # Arduino usually resets when serial opens.
-            self.ser.reset_input_buffer()
+            self.ser = serial.Serial(
+                self.port,
+                self.baud,
+                timeout=0,
+                write_timeout=0.25,
+            )
 
-            self.send_ui("connected", f"Connected to Arduino on {self.port} @ {self.baud}")
+            if not self.wait_for_bridge_ack():
+                return
+
+            self.send_ui("connected", f"Bridge verified on {self.port} @ {self.baud}")
             self.send_ui(
                 "info",
-                "Controls: hold R1 for motor enable, left stick Y = throttle, right stick = servos, X = kill, L1 = center servos",
+                "Controls: R1 = enable, left Y = throttle, left X = yaw, "
+                "right stick = roll/pitch, X = latched kill.",
             )
 
             period = 1.0 / max(1.0, float(self.hz))
             last_raw_print = 0.0
+            next_send_time = time.monotonic()
 
             while not self.stop_event.is_set():
-                # Check for app button commands.
-                try:
-                    while True:
-                        command = self.command_queue.get_nowait()
-
-                        if command == "kill":
-                            self.stop_safely("KILL requested from app.")
-                        elif command == "disconnect":
-                            self.stop_safely("Disconnect requested from app.")
-
-                except queue.Empty:
-                    pass
-
-                if self.stop_event.is_set():
+                if not self.process_commands():
                     break
 
-                pygame.event.pump()
+                now = time.monotonic()
+                if now >= next_send_time:
+                    self.send_json(self.controller_payload())
+                    next_send_time += period
+                    if next_send_time < now:
+                        next_send_time = now + period
 
-                # Common DualShock 4 mappings in pygame:
-                # axis 0 = left stick X
-                # axis 1 = left stick Y, negative when pushed upward
-                # axis 2 = right stick X on many systems
-                # axis 3 or 5 = right stick Y depending on OS/driver
-                raw_lx = get_axis_safe(self.joystick, 0)
-                raw_ly = get_axis_safe(self.joystick, 1)
-                raw_rx = get_axis_safe(self.joystick, 2)
-                raw_ry = get_axis_safe(self.joystick, 3, get_axis_safe(self.joystick, 5))
+                for line in self.read_serial_lines():
+                    self.handle_serial_line(line)
 
-                payload = {
-                    "lx": normalize_axis(raw_lx),
-                    "ly": normalize_axis(-raw_ly),  # push up = positive throttle
-                    "rx": normalize_axis(raw_rx),
-                    "ry": normalize_axis(-raw_ry),
-                    "cross": get_button_safe(self.joystick, 0),
-                    "circle": get_button_safe(self.joystick, 1),
-                    "square": get_button_safe(self.joystick, 2),
-                    "triangle": get_button_safe(self.joystick, 3),
-                    "l1": get_button_safe(self.joystick, 4),
-                    "r1": get_button_safe(self.joystick, 10),
-                }
-
-                self.send_json(payload)
-
-                while self.ser and self.ser.in_waiting:
-                    ack = self.ser.readline().decode("utf-8", errors="ignore").strip()
-                    if ack:
-                        self.send_ui("ack", ack)
+                if (
+                    self.last_ack_time is not None
+                    and not self.telemetry_lost
+                    and time.monotonic() - self.last_ack_time > TELEMETRY_TIMEOUT_S
+                ):
+                    self.telemetry_lost = True
+                    self.kill_latched = True
+                    self.send_ui("kill_state", True)
+                    self.send_ui(
+                        "telemetry_stale",
+                        "Telemetry timed out. Safety commands are being sent; kill is latched.",
+                    )
 
                 if self.show_raw and time.time() - last_raw_print > 0.5:
                     axes = [round(get_axis_safe(self.joystick, i), 3) for i in range(self.joystick.get_numaxes())]
@@ -244,15 +412,14 @@ class BridgeWorker(threading.Thread):
                     self.send_ui("info", f"RAW axes={axes} buttons={buttons}")
                     last_raw_print = time.time()
 
-                time.sleep(period)
+                self.stop_event.wait(0.005)
 
         except Exception as exc:
             self.send_ui("error", str(exc))
 
         finally:
             try:
-                self.send_json(safety_payload())
-                time.sleep(0.05)
+                self.send_safety_burst()
             except Exception:
                 pass
 
@@ -287,6 +454,9 @@ class DroneApp(tk.Tk):
         self.worker = None
         self.ui_queue = queue.Queue()
         self.command_queue = queue.Queue()
+        self.kill_latched = False
+        self.closing = False
+        self.close_deadline = None
 
         # Tkinter variables
         self.port_var = tk.StringVar()
@@ -332,6 +502,9 @@ class DroneApp(tk.Tk):
 
         self.motor_lock_var = tk.StringVar(value="Motor Locked")
         self.kill_var = tk.StringVar(value="Kill Switch Off")
+        self.failsafe_var = tk.StringVar(value="Failsafe Unknown")
+        self.imu_var = tk.StringVar(value="IMU Unknown")
+        self.throttle_check_var = tk.StringVar(value="Throttle Check Unknown")
         self.centered_var = tk.StringVar(value="Servo Control Active")
 
         self.new_ack_var = tk.StringVar(value="Waiting for data...")
@@ -361,7 +534,10 @@ class DroneApp(tk.Tk):
         title = ttk.Label(root, text="Drone Dashboard", font=("Times New Roman", 22, "bold"))
         title.pack(anchor="w")
 
-        subtitle = ttk.Label(root, text="PS4 controller -> bridge -> Arduino")
+        subtitle = ttk.Label(
+            root,
+            text="PS4 controller -> USB or Bluetooth serial bridge -> Arduino Mega",
+        )
         subtitle.pack(anchor="w", pady=(0, 15))
 
         # Connection frame
@@ -369,7 +545,11 @@ class DroneApp(tk.Tk):
         connection_box.pack(fill="x")
         connection_box.columnconfigure(1, weight=1)
 
-        ttk.Label(connection_box, text="USB / COM Port:").grid(row=0, column=0, sticky="w")
+        ttk.Label(connection_box, text="Serial / Bluetooth COM Port:").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
 
         self.port_combo = ttk.Combobox(connection_box, textvariable=self.port_var, width=45)
         self.port_combo.grid(row=0, column=1, sticky="ew", padx=8)
@@ -485,12 +665,15 @@ class DroneApp(tk.Tk):
         safety_box = ttk.LabelFrame(root, text="Safety Status", padding=10)
         safety_box.pack(fill="x", pady=15)
 
-        for i in range(3):
+        for i in range(6):
             safety_box.columnconfigure(i, weight=1)
 
         self.make_metric(safety_box, "Motor Lock", self.motor_lock_var, 0, 0)
         self.make_metric(safety_box, "Kill Switch", self.kill_var, 0, 1)
-        self.make_metric(safety_box, "Servo Control", self.centered_var, 0, 2)
+        self.make_metric(safety_box, "Failsafe", self.failsafe_var, 0, 2)
+        self.make_metric(safety_box, "IMU", self.imu_var, 0, 3)
+        self.make_metric(safety_box, "Arm Check", self.throttle_check_var, 0, 4)
+        self.make_metric(safety_box, "Servo Control", self.centered_var, 0, 5)
 
         # Raw ACK frame
         ack_box = ttk.LabelFrame(root, text="ACK Data", padding=10)
@@ -533,6 +716,7 @@ class DroneApp(tk.Tk):
     # Refresh COM ports
     # -----------------------------
     def refresh_ports(self):
+        previously_selected = self.selected_port() if self.port_map else ""
         ports = list(list_ports.comports())
         self.port_map.clear()
         display_values = []
@@ -545,7 +729,15 @@ class DroneApp(tk.Tk):
         self.port_combo["values"] = display_values
 
         if display_values:
-            self.port_var.set(display_values[0])
+            restored = next(
+                (
+                    display
+                    for display, device in self.port_map.items()
+                    if device == previously_selected
+                ),
+                display_values[0],
+            )
+            self.port_var.set(restored)
             self.log(f"Found {len(display_values)} serial port(s).")
         else:
             self.port_var.set("No Ports Found")
@@ -572,14 +764,18 @@ class DroneApp(tk.Tk):
         try:
             baud = int(self.baud_var.get())
             hz = float(self.hz_var.get())
-            if baud <= 0 or hz <= 0:
+            if baud <= 0 or not 5.0 <= hz <= 50.0:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Bad settings", "Baud must be an integer and Hz must be a positive number.")
+            messagebox.showerror(
+                "Bad settings",
+                "Baud must be a positive integer. Command rate must be between 5 and 50 Hz.",
+            )
             return
 
         self.ui_queue = queue.Queue()
         self.command_queue = queue.Queue()
+        self.kill_latched = False
 
         self.worker = BridgeWorker(
             port=port,
@@ -595,7 +791,7 @@ class DroneApp(tk.Tk):
         self.connection_var.set(f"Connecting to {port}...")
         self.connect_button.config(state="disabled")
         self.disconnect_button.config(state="normal")
-        self.kill_button.config(state="normal")
+        self.kill_button.config(text="KILL / STOP", state="disabled")
         self.log(f"Starting bridge on {port} @ {baud}, {hz} Hz.")
 
     # -----------------------------
@@ -614,11 +810,21 @@ class DroneApp(tk.Tk):
     # -----------------------------
     def kill_bridge(self):
         if self.worker and self.worker.is_alive():
-            self.command_queue.put("kill")
-            self.connection_var.set("KILL requested...")
-            self.disconnect_button.config(state="disabled")
-            self.kill_button.config(state="disabled")
-            self.log("KILL / STOP pressed. Sending safety command.")
+            if self.kill_latched:
+                self.command_queue.put("reset_kill")
+                self.log("Kill reset requested.")
+            else:
+                self.command_queue.put("kill")
+                self.log("KILL / STOP pressed. Safety command latched.")
+
+    def set_kill_state(self, latched):
+        self.kill_latched = bool(latched)
+        if self.kill_latched:
+            self.kill_button.config(text="RESET KILL")
+            self.kill_var.set("Kill Latched")
+        else:
+            self.kill_button.config(text="KILL / STOP")
+            self.kill_var.set("Kill Switch Off")
 
     # -----------------------------
     # Update dashboard from Arduino ACK
@@ -702,7 +908,18 @@ class DroneApp(tk.Tk):
         self.ry_var.set(str(data["ry"]))
 
         self.motor_lock_var.set("Motor Locked" if data["motor_locked"] else "Motor Enabled")
-        self.kill_var.set("Kill Active" if data["kill"] else "Kill Switch Off")
+        if data["kill"]:
+            self.kill_var.set("Kill Active")
+        elif self.kill_latched:
+            self.kill_var.set("Kill Latched")
+        else:
+            self.kill_var.set("Kill Switch Off")
+
+        self.failsafe_var.set("Failsafe Active" if data["failsafe"] else "Link Healthy")
+        self.imu_var.set("IMU Error" if data["imu_error"] else "IMU Ready")
+        self.throttle_check_var.set(
+            "Lower Throttle" if data["throttle_not_low"] else "Throttle OK"
+        )
         self.centered_var.set("Servos Centered" if data["centered"] else "Servo Control Active")
 
         self.new_ack_var.set(ack_line)
@@ -719,6 +936,7 @@ class DroneApp(tk.Tk):
                     self.update_dashboard(message)
                 elif kind == "connected":
                     self.connection_var.set(message)
+                    self.kill_button.config(state="normal")
                     self.log(message)
                 elif kind == "stopped":
                     self.connection_var.set("Disconnected")
@@ -732,7 +950,16 @@ class DroneApp(tk.Tk):
                     self.disconnect_button.config(state="disabled")
                     self.kill_button.config(state="disabled")
                     self.log(f"ERROR: {message}")
-                    messagebox.showerror("Bridge error", message)
+                    if not self.closing:
+                        messagebox.showerror("Bridge error", message)
+                elif kind == "kill_state":
+                    self.set_kill_state(message)
+                elif kind == "telemetry_stale":
+                    self.connection_var.set("Telemetry lost — safety stop active")
+                    self.log(f"WARNING: {message}")
+                elif kind == "telemetry_recovered":
+                    self.connection_var.set("Telemetry restored — kill remains latched")
+                    self.log(message)
                 elif kind == "warning":
                     self.log(f"WARNING: {message}")
                 else:
@@ -747,9 +974,30 @@ class DroneApp(tk.Tk):
     # Window close behavior
     # -----------------------------
     def on_close(self):
+        if self.closing:
+            return
+
+        self.closing = True
         if self.worker and self.worker.is_alive():
             self.command_queue.put("disconnect")
-            self.worker.stop_event.set()
+            self.connection_var.set("Closing safely...")
+            self.connect_button.config(state="disabled")
+            self.disconnect_button.config(state="disabled")
+            self.kill_button.config(state="disabled")
+            self.close_deadline = time.monotonic() + 1.5
+            self.after(50, self.finish_close)
+        else:
+            self.destroy()
+
+    def finish_close(self):
+        if (
+            self.worker
+            and self.worker.is_alive()
+            and time.monotonic() < self.close_deadline
+        ):
+            self.after(50, self.finish_close)
+            return
+
         self.destroy()
 
 

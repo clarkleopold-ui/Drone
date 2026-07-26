@@ -1,0 +1,184 @@
+AMBATUDRONE WINDOWS .EXE INSTALLATION INSTRUCTIONS
+==================================================
+
+Purpose
+-------
+These steps turn droneControl4Motor.py into a normal Windows application named
+AmbatuDrone.exe. After the one-time setup, launch it from a Desktop or Start
+Menu icon; you will not need to type Python commands each time.
+
+
+BEFORE YOU START
+----------------
+1. Use the Windows computer on which you want to run the app.
+2. Make sure Python is installed.
+3. Put droneControl4Motor.py in its own folder. For example:
+
+   C:\AmbatuDrone
+
+4. If Windows asks whether Python may communicate through the firewall, allow
+   it on private networks.
+
+
+STEP 1 - OPEN POWERSHELL IN THE APP FOLDER
+------------------------------------------
+1. Open the folder containing droneControl4Motor.py in File Explorer.
+2. Click the address bar.
+3. Type:
+
+   powershell
+
+4. Press Enter.
+
+PowerShell should open directly in the correct folder.
+
+
+STEP 2 - INSTALL THE REQUIRED PACKAGES
+--------------------------------------
+Run this command once:
+
+   py -m pip install --upgrade pygame pyserial pyinstaller
+
+If Windows says that "py" is not recognized, try:
+
+   python -m pip install --upgrade pygame pyserial pyinstaller
+
+
+STEP 3 - BUILD THE .EXE
+-----------------------
+Run this command:
+
+   py -m PyInstaller --noconfirm --clean --onefile --windowed --name AmbatuDrone --collect-all pygame --hidden-import serial.tools.list_ports droneControl4Motor.py
+
+If your computer requires the "python" command instead of "py", use:
+
+   python -m PyInstaller --noconfirm --clean --onefile --windowed --name AmbatuDrone --collect-all pygame --hidden-import serial.tools.list_ports droneControl4Motor.py
+
+Wait for PowerShell to report that the build completed successfully.
+
+
+STEP 4 - FIND AND TEST THE APP
+------------------------------
+1. Open the app folder.
+2. Open the new "dist" folder.
+3. Double-click:
+
+   AmbatuDrone.exe
+
+The first launch may take several seconds because Windows must unpack the
+single-file application.
+
+The app should open even when no controller or Arduino is connected. Hardware
+connection errors should appear inside the app instead of preventing it from
+launching.
+
+
+STEP 5 - CREATE A DESKTOP ICON
+------------------------------
+Windows 11:
+
+1. Right-click AmbatuDrone.exe.
+2. Select "Show more options."
+3. Select "Send to" and then "Desktop (create shortcut)."
+
+Windows 10:
+
+1. Right-click AmbatuDrone.exe.
+2. Select "Send to" and then "Desktop (create shortcut)."
+
+You can rename the shortcut to "AmbatuDrone." From then on, double-click that
+Desktop icon to launch the app.
+
+Do not move or delete AmbatuDrone.exe after creating the shortcut. The shortcut
+points to that file.
+
+
+OPTIONAL - ADD IT TO THE START MENU
+-----------------------------------
+1. Press Windows key + R.
+2. Enter:
+
+   shell:programs
+
+3. Press Enter.
+4. Copy the AmbatuDrone Desktop shortcut into the folder that opens.
+
+The app will then appear in the Windows Start Menu. You may also right-click
+the shortcut and choose "Pin to Start" or "Pin to taskbar" if Windows offers
+those choices.
+
+
+OPTIONAL - USE A CUSTOM APP ICON
+--------------------------------
+Windows application icons must use the .ico format. Put an icon named
+AmbatuDrone.ico beside droneControl4Motor.py, then rebuild with:
+
+   py -m PyInstaller --noconfirm --clean --onefile --windowed --name AmbatuDrone --icon AmbatuDrone.ico --collect-all pygame --hidden-import serial.tools.list_ports droneControl4Motor.py
+
+After rebuilding, delete and recreate an old shortcut if Windows continues to
+show its cached icon.
+
+
+WHEN THE PYTHON CODE CHANGES
+----------------------------
+After editing droneControl4Motor.py, rebuild the .exe by opening PowerShell in
+the source folder and running the same Step 3 command again.
+
+The new file will be:
+
+   dist\AmbatuDrone.exe
+
+If the old app is running, close it before rebuilding. PyInstaller cannot
+replace an .exe that Windows is currently using.
+
+
+NORMAL DAILY USE
+----------------
+1. Connect the PS4 controller.
+2. Connect the Arduino Mega by USB, or select the Bluetooth COM port after the
+   ESP32 bridge has been completed and tested.
+3. Double-click the AmbatuDrone shortcut.
+4. Select the correct COM port and connect inside the app.
+
+No PowerShell or Python command is needed for normal daily launches.
+
+
+QUICK TROUBLESHOOTING
+---------------------
+"py" is not recognized:
+Use "python" in place of "py". If neither works, reinstall Python and enable
+"Add Python to PATH" during installation.
+
+The build says droneControl4Motor.py cannot be found:
+PowerShell is open in the wrong folder. Repeat Step 1 from the folder that
+actually contains the Python file.
+
+Windows SmartScreen appears:
+This can happen because the app is locally built and not digitally signed.
+Confirm that the file is the one you built. Select "More info" and then
+"Run anyway" if you trust it.
+
+The app opens but no COM ports appear:
+Connect the Arduino, install its USB driver if required, close Arduino Serial
+Monitor, and press the app's port-refresh control. Bluetooth will appear only
+after Windows pairs the ESP32 and creates a Bluetooth serial COM port.
+
+The app does not open:
+Build a temporary diagnostic version without "--windowed":
+
+   py -m PyInstaller --noconfirm --clean --onefile --name AmbatuDrone_Debug --collect-all pygame --hidden-import serial.tools.list_ports droneControl4Motor.py
+
+Run dist\AmbatuDrone_Debug.exe from PowerShell. The console window will show
+the startup error. Use this debug build only for troubleshooting.
+
+Windows Security quarantines the file:
+Locally generated one-file applications can occasionally trigger a false
+positive. Verify that you built it from your own source. Do not bypass a warning
+for an .exe received from an unknown person.
+
+
+SAFETY REMINDER
+---------------
+Test controller, serial, kill, and failsafe behavior with all propellers removed.
+Packaging the bridge as an .exe changes only how the app launches; it does not
+replace hardware safety testing.
