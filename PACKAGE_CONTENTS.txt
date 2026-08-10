@@ -1,0 +1,43 @@
+AMBATUDRONE PACKAGE CONTENTS
+============================
+
+droneControl4Motor.py
+    Integrated PS4 bridge and dashboard. Shows percent, fixed motor direction,
+    exact raw 1000-2000 us command, roll, pitch, relative yaw, and yaw rate.
+
+INSTALL_AMBATUDRONE_WINDOWS.bat / BUILD_AMBATUDRONE_MAC.command
+    One-click platform builder for AmbatuDrone.exe or AmbatuDrone.app.
+
+RUN_SOURCE_WINDOWS.bat / RUN_SOURCE_MAC.command
+    Runs the editable source after dependencies are installed.
+
+Firmware/Primary_Teensy_Flight_Logger/
+    Primary Teensy 4.1 combined flight controller and 48 kHz stereo logger.
+
+Firmware/Feather_Ground_Radio/
+    USB-to-915 MHz bridge for the computer-side Feather M0 RFM95.
+
+Firmware/Feather_Airborne_Radio/
+    915 MHz-to-UART bridge between airborne Feather and Teensy Serial1.
+
+Firmware/Legacy_Separate_Boards/
+    Previous direct ESP32 flight controller and independent Teensy logger.
+
+Tools/extract_motor_run.py
+    Converts RUN####.WAV + RUN####.JSON into audio WAV and current CSV.
+
+START_HERE_*.txt
+    Operating-system-specific installation and startup steps.
+
+WIRING_AND_POWER.txt
+    Full Teensy, Feather, Zeus, sensor, UART, and regulated-power wiring.
+
+ESC_PWM_AND_LIMITS.txt
+    Explains why 2000 us is the command maximum but not a motor-load guarantee.
+
+ARDUINO_UPLOAD_GUIDE.txt
+    Firmware upload sequence and required board/library support.
+
+BENCH_TEST_CHECKLIST.txt
+    Required propeller-free validation sequence.
+

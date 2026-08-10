@@ -1,0 +1,116 @@
+AMBATUDRONE TEENSY / FEATHER / ZEUS WIRING AND POWER
+===================================================
+
+REMOVE ALL PROPELLERS. VERIFY EVERY VOLTAGE WITH A MULTIMETER BEFORE PLUGGING
+IT INTO A BOARD.
+
+
+POWER ARCHITECTURE
+------------------
+
+The HGLRC Zeus 60A 4-in-1 ESC is rated for a 3S-6S LiPo but has NO BEC.
+It does not provide a regulated 5 V output for the Teensy or Feather.
+
+Use a separate regulated 5 V buck/BEC supply:
+
+    6S battery + / -
+        |-- Zeus ESC battery pads -> motors
+        |
+        `-- 6S-rated 5 V buck/BEC
+                |-- regulated 5 V -> Teensy VIN
+                |-- regulated 5 V -> airborne Feather through a dedicated
+                |                    USB power cable/input
+                `-- GND -> Teensy GND, Feather GND, and Zeus signal GND
+
+Do not connect 22.2-25.2 V directly to Teensy VIN, Feather USB/BAT/3V, the
+MPU-6050, microphone, or current-sensor signal pins.
+
+Do not connect the externally powered Teensy or airborne Feather to a computer
+USB port until USB/external-power backfeed has been handled correctly. The
+simplest test rule is: disconnect the flight battery before plugging in USB.
+
+
+TEENSY 4.1 CONNECTIONS
+----------------------
+
+Teensy pin        Connect to
+----------        ----------
+VIN               Regulated 5 V BEC output
+GND               Common electronics/ESC signal ground
+3.3V              MPU-6050 VCC, MAX4466 VCC, ACS72981 VCC
+Pin 0 / RX1       Airborne Feather TX
+Pin 1 / TX1       Airborne Feather RX
+Pin 2             Momentary record button to GND (optional)
+Pin 3             Zeus ESC motor signal 1
+Pin 4             Zeus ESC motor signal 2
+Pin 5             Zeus ESC motor signal 3
+Pin 6             Zeus ESC motor signal 4
+Pin 16 / A2       Filtered MAX4466 microphone output
+Pin 17 / A3       Filtered ACS72981 current-sensor output
+Pin 18 / SDA      MPU-6050 SDA
+Pin 19 / SCL      MPU-6050 SCL
+Built-in microSD  FAT32 microSD card
+
+Never power a motor or ESC power lead from a Teensy pin.
+
+
+AIRBORNE FEATHER UART
+---------------------
+
+Feather TX -> Teensy pin 0 / RX1
+Feather RX <- Teensy pin 1 / TX1
+Feather GND -> Teensy GND
+
+Both UARTs use 3.3 V logic and 115200 baud. Keep these wires short and away
+from the battery and motor-phase wires.
+
+
+GROUND FEATHER
+--------------
+
+The ground Feather is powered by the computer's USB port. No UART wiring is
+needed on the ground side. The Windows/Mac app selects its USB serial port.
+
+
+SENSOR FILTERS
+--------------
+
+MAX4466 OUT -> 1 kOhm -> junction -> Teensy A2
+                              |
+                            10 nF
+                              |
+                             GND
+
+ACS72981 OUT -> 1 kOhm -> junction -> Teensy A3
+                                |
+                              10 nF
+                                |
+                               GND
+
+The 10 nF capacitor goes from the Teensy-side junction to GND. It is not in
+series with the signal. Each sensor needs its own filter.
+
+
+CURRENT SENSOR POWER PATH
+-------------------------
+
+Battery positive -> ACS72981 IP+ / current input
+ACS72981 IP- / current output -> Zeus ESC positive battery pad
+Battery negative -> Zeus ESC negative battery pad
+
+Use the correct high-current wire, connectors, insulation, and strain relief.
+The sensor's +/-50 A measurement range is below the Zeus ESC's possible total
+four-motor current. It cannot measure or enforce the full 4 x 60 A ESC rating.
+
+
+RADIO ANTENNAS
+--------------
+
+Attach the correct 900/915 MHz antenna to each RFM95 before transmitting.
+Both sketches are set to 915.0 MHz and must match.
+
+References:
+https://www.hglrc.com/pages/download
+https://learn.adafruit.com/adafruit-feather-m0-radio-with-lora-radio-module
+https://www.pjrc.com/teensy/external_power.html
+

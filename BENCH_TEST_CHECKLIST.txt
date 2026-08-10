@@ -1,0 +1,68 @@
+AMBATUDRONE FIRST BENCH-TEST CHECKLIST
+======================================
+
+STOP if any check fails. REMOVE ALL PROPELLERS for this entire checklist.
+
+
+POWER-OFF INSPECTION
+--------------------
+
+[ ] The damaged ESP32 and damaged ESC are not connected.
+[ ] The replacement ESC is the HGLRC Zeus 60A BLHeli_32 3S-6S 4-in-1.
+[ ] There are no exposed conductors or loose wires.
+[ ] Battery polarity is verified at every connector.
+[ ] The 5 V BEC/buck is rated for 6S input.
+[ ] The Zeus ESC is not being used as a 5 V source; it has no BEC.
+[ ] Ground is shared between Teensy, airborne Feather, MPU-6050, sensors, and
+    Zeus signal ground.
+[ ] RFM95 antennas are installed.
+[ ] microSD card is inserted.
+
+
+LOW-VOLTAGE TEST — ESC/BATTERY DISCONNECTED
+-------------------------------------------
+
+[ ] Regulated supply measures about 5.0 V before connection to Teensy VIN.
+[ ] Sensor rail measures about 3.3 V.
+[ ] ACS72981 OUT/A3 is near the ADC midpoint with zero current.
+[ ] MAX4466 OUT/A2 is near the ADC midpoint.
+[ ] Teensy Serial Monitor reports SD ready, current zero valid, and IMU ready.
+[ ] Ground/air Feather telemetry reaches the app.
+[ ] The app shows PWM 1000 us and Motor Locked.
+[ ] KILL and radio-loss tests leave every ESC signal at its stopped command.
+
+
+ESC SIGNAL TEST — REPLACEMENT ESC CONNECTED, NO MOTOR POWER YET
+---------------------------------------------------------------
+
+[ ] Oscilloscope/logic analyzer shows about 1000 us stopped pulses.
+[ ] A controlled command can reach 2000 us on the Teensy output pin.
+[ ] Releasing R1 returns the output to 1000 us.
+[ ] X/KILL returns the output to 1000 us.
+[ ] Disconnecting the ground Feather causes the Teensy failsafe within 500 ms.
+
+
+ONE-MOTOR POWER TEST — NO PROPELLER
+-----------------------------------
+
+[ ] Only one known-good motor is connected for the first powered test.
+[ ] The battery is secured and an accessible disconnect is available.
+[ ] Throttle is at zero before R1 is held.
+[ ] Motor starts smoothly at low command.
+[ ] Battery voltage is measured while running.
+[ ] Dashboard raw PWM matches the measured signal/command.
+[ ] Current, temperature, and motor sound remain reasonable.
+[ ] Releasing R1 stops the motor.
+[ ] The Teensy LED turns off after the recording is finalized.
+[ ] RUN####.WAV and RUN####.JSON exist on the microSD card.
+[ ] The JSON reports zero dropped frames and no write failure.
+
+
+DO NOT INSTALL PROPELLERS YET
+-----------------------------
+
+The combined flight/logger firmware must first demonstrate stable 250 Hz loop
+timing while recording, zero logger drops, correct motor order/direction, and
+every failsafe. A restrained thrust test with the exact propeller and measured
+current is a separate later stage.
+

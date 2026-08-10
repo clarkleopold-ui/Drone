@@ -1,0 +1,75 @@
+HGLRC ZEUS 60A ESC — COMMAND RANGE AND SAFE LIMITS
+=================================================
+
+ESC IDENTIFICATION USED BY THIS PACKAGE
+---------------------------------------
+
+HGLRC Zeus 60A BLHeli_32 3S-6S 4-in-1 ESC
+
+Published specifications for the Zeus family list:
+
+- 3S-6S LiPo input
+- 60 A continuous current per motor channel
+- 65 A burst current per motor channel for 10 seconds
+- BLHeli_32 firmware
+- DShot and OneShot protocol support (versions vary)
+- no BEC
+
+
+WHAT "100% PWM" MEANS HERE
+---------------------------
+
+This Teensy bench firmware uses conventional servo-style ESC pulses:
+
+    stopped/minimum command: 1000 microseconds
+    25% command:             1250 microseconds
+    50% command:             1500 microseconds
+    100% command:            2000 microseconds
+
+Therefore the dashboard must show PWM: 2000 us when the actual command reaches
+100%. The app displays the exact value reported by the Teensy; it does not
+estimate the PWM from sound or motor speed.
+
+The code constants are:
+
+    THROTTLE_MIN_US = 1000
+    THROTTLE_MAX_US = 2000
+
+
+IMPORTANT: 2000 us IS A COMMAND MAXIMUM, NOT A GUARANTEE OF SAFE LOAD
+------------------------------------------------------------------------
+
+The 5010 motor's 360 KV value only predicts approximate no-load RPM per volt.
+It does not specify a safe propeller, current, temperature, or mechanical load.
+On a fully charged 6S battery, the approximate no-load speed is:
+
+    360 KV x 25.2 V = 9072 RPM
+
+The safe loaded throttle cannot be selected from KV and ESC rating alone. It
+requires the exact motor manufacturer's 6S propeller/current table, or a staged
+test measuring current, motor temperature, ESC temperature, vibration, and RPM.
+
+Do not treat the 60 A ESC rating as a target. It is an upper electrical rating,
+not the recommended operating current for the motor.
+
+
+WHY A MOTOR CAN LOOK CAPPED EVEN AT 2000 us
+-------------------------------------------
+
+If the dashboard reports 2000 us but RPM does not rise as expected, check:
+
+1. Measure the physical ESC signal pulse or protocol with an oscilloscope or
+   logic analyzer.
+2. Measure the 6S battery voltage while the motor is running, not only at rest.
+3. Check every high-current connector and solder joint for voltage drop/heat.
+4. Confirm the Zeus ESC recognizes standard PWM input. The Zeus also supports
+   faster digital/OneShot protocols; some configurations may need recalibration
+   or a later DShot port.
+5. Use an optical tachometer. A 360 KV motor sounds slower than a high-KV FPV
+   motor even when operating normally.
+
+Do not calibrate or configure the ESC with propellers installed.
+
+Published product reference:
+https://www.hglrc.com/pages/download
+
