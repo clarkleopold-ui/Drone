@@ -1,0 +1,118 @@
+AMBATUDRONE WINDOWS COMPLETE PACKAGE — 2026-08-09
+==================================================
+
+THIS PACKAGE USES THE TEENSY 4.1 AS THE PRIMARY FLIGHT CONTROLLER AND LOGGER.
+THE INCLUDED LEGACY ESP32 FIRMWARE IS ONLY A FALLBACK/REFERENCE.
+
+REMOVE ALL PROPELLERS BEFORE EVERY SETUP OR BENCH TEST.
+
+
+1. INSTALL THE WINDOWS APP
+--------------------------
+
+1. Extract the entire ZIP. Do not run it from inside the ZIP.
+2. Install 64-bit Python 3.13 from https://www.python.org/downloads/ if needed.
+3. During Python setup, enable "Add python.exe to PATH".
+4. Double-click INSTALL_AMBATUDRONE_WINDOWS.bat.
+5. The installer tests the protocol, builds AmbatuDrone.exe, installs it for
+   your Windows account, and creates Desktop and Start Menu shortcuts.
+6. The app opens in Demo Mode, which cannot send hardware commands.
+
+The installed executable is:
+
+    %LOCALAPPDATA%\AmbatuDrone\AmbatuDrone.exe
+
+
+2. VERIFY THE DASHBOARD IN DEMO MODE
+------------------------------------
+
+1. Leave Demo Mode checked.
+2. Click Start Demo.
+3. Confirm every motor shows:
+     - percentage
+     - direction
+     - raw PWM in microseconds
+4. Confirm the raw value can sweep through the 1000-2000 us range.
+5. Confirm Flight Telemetry shows Roll, Pitch, Relative Yaw, and Yaw Rate.
+6. Click KILL / STOP and confirm all motors show 0% and PWM: 1000 us.
+
+
+3. UPLOAD THE FIRMWARE
+----------------------
+
+Follow ARDUINO_UPLOAD_GUIDE.txt in this folder.
+
+Primary onboard firmware:
+
+    Firmware\Primary_Teensy_Flight_Logger\
+    AmbatuDrone_Teensy_Flight_Logger.ino
+
+Radio firmware:
+
+    Firmware\Feather_Ground_Radio\AmbatuDrone_Feather_Ground_Radio.ino
+    Firmware\Feather_Airborne_Radio\AmbatuDrone_Feather_Airborne_Radio.ino
+
+
+4. CONNECT THE RADIO SYSTEM
+---------------------------
+
+The normal wireless path is:
+
+    PS4 controller
+      -> Windows AmbatuDrone app
+      -> USB ground Feather M0 RFM95
+      -> 915 MHz radio
+      -> airborne Feather M0 RFM95
+      -> Teensy Serial1
+      -> Zeus ESC and motors
+
+In AmbatuDrone:
+
+1. Connect the PS4 controller to Windows.
+2. Connect the ground Feather by USB.
+3. Uncheck Demo Mode.
+4. Refresh ports and select the ground Feather COM port.
+5. Leave Baud at 115200 and Hz at 25.
+6. Click Connect.
+
+For the first test, the airborne electronics may be powered on the bench, but
+the propellers must remain removed.
+
+
+5. CONTROLS
+-----------
+
+R1 hold       Arm/enable motors after the throttle-low check
+Left stick Y  Throttle
+Left stick X  Yaw command
+Right stick   Roll and pitch commands
+X / Cross     Latched kill
+
+The Teensy begins logging before it arms. Releasing R1 or activating KILL
+stops the motors first, then finalizes RUN####.WAV and RUN####.JSON.
+
+
+6. EXTRACT LOGGER FILES
+-----------------------
+
+Copy the matching RUN####.WAV and RUN####.JSON from the microSD card into one
+folder. Open Command Prompt in that folder and run:
+
+    py -3 "FULL_PATH_TO_PACKAGE\Tools\extract_motor_run.py" RUN0001.WAV
+
+Outputs:
+
+    RUN0001_audio.wav
+    RUN0001_current.csv
+
+
+READ THESE BEFORE CONNECTING THE 6S BATTERY
+-------------------------------------------
+
+    WIRING_AND_POWER.txt
+    ESC_PWM_AND_LIMITS.txt
+    BENCH_TEST_CHECKLIST.txt
+
+The HGLRC Zeus 60A 4-in-1 ESC has no onboard BEC. It cannot power the Teensy
+or Feather. Never connect the 6S battery directly to either board.
+

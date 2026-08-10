@@ -1,0 +1,78 @@
+ARDUINO UPLOAD GUIDE
+====================
+
+REMOVE ALL PROPELLERS.
+
+
+A. TEENSY 4.1 PRIMARY FLIGHT/LOGGER FIRMWARE
+--------------------------------------------
+
+1. Install Arduino IDE 2.x.
+2. Install Teensy board support using PJRC's current Teensyduino instructions:
+   https://www.pjrc.com/teensy/td_download.html
+3. Open:
+   Firmware/Primary_Teensy_Flight_Logger/
+   AmbatuDrone_Teensy_Flight_Logger.ino
+4. Select Tools -> Board -> Teensy -> Teensy 4.1.
+5. Confirm the libraries ADC, Servo, SD/SdFat, IntervalTimer, and Wire come from
+   the Teensy board installation. Remove conflicting duplicate Servo libraries
+   if Arduino reports the wrong one.
+6. Connect only the Teensy by USB, select its port, and Upload.
+7. Open Serial Monitor at 115200 baud.
+8. Keep the MPU-6050 still during startup.
+9. Confirm the startup text does not report microSD, current-zero, IMU, or PWM
+   output errors.
+
+
+B. FEATHER M0 BOARD SUPPORT AND RADIOHEAD
+----------------------------------------
+
+1. Install Adafruit SAMD Boards in Arduino Board Manager.
+2. Install the RadioHead library used by RH_RF95.h.
+3. Follow Adafruit's current Feather M0 RFM95 Arduino setup guide:
+   https://learn.adafruit.com/adafruit-feather-m0-radio-with-lora-radio-module
+4. Fit a 900/915 MHz antenna before transmitting.
+
+
+C. GROUND FEATHER
+-----------------
+
+1. Open:
+   Firmware/Feather_Ground_Radio/AmbatuDrone_Feather_Ground_Radio.ino
+2. Select Adafruit Feather M0 (SAMD21) and the correct USB port.
+3. Upload.
+4. Leave this Feather connected to the computer by USB.
+
+
+D. AIRBORNE FEATHER
+-------------------
+
+1. Open:
+   Firmware/Feather_Airborne_Radio/AmbatuDrone_Feather_Airborne_Radio.ino
+2. Select Adafruit Feather M0 (SAMD21) and its USB port.
+3. Upload.
+4. Disconnect USB before wiring external flight power.
+5. Wire Feather TX/RX/GND to Teensy RX1/TX1/GND as shown in
+   WIRING_AND_POWER.txt.
+
+
+E. FIRST RADIO TEST
+-------------------
+
+1. Keep every ESC signal wire disconnected from the Teensy.
+2. Power the Teensy and airborne Feather from safe regulated supplies.
+3. Connect the ground Feather to the computer.
+4. Open AmbatuDrone, uncheck Demo Mode, select the ground Feather port, and
+   connect at 115200 baud / 25 Hz.
+5. Confirm telemetry appears and the dashboard says Motor Locked.
+6. Disconnect and remove power before adding the ESC signal wires.
+
+
+LEGACY FILES
+------------
+
+Firmware/Legacy_Separate_Boards contains the previous ESP32 flight controller
+and independent Teensy logger. Do not upload both the primary combined Teensy
+firmware and the legacy logger to the same Teensy; only one sketch can be stored
+and run at a time.
+
